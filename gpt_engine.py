@@ -1,58 +1,72 @@
-import openai
-import json
+# gpt_engine.py
 import os
 from dotenv import load_dotenv
+from openai import OpenAI
 
-load_dotenv()  # Load environment variables from .env
+# Load environment variables from .env file
+load_dotenv()
 
-# Fetch API key from environment variable
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Get API key from environment
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY environment variable is not set! Please add it to your .env file.")
 
+# Initialize OpenAI client with the API key
+client = OpenAI(api_key=api_key)
 
-def generate_epics_and_stories(user_goal):
-    prompt = f"""
-    Based on the product goal: "{user_goal}", generate 1-2 epics and 2-3 user stories per epic.
-    
-    Respond strictly in this JSON format:
-
-    {{
-        "epics": [
-            {{
-                "summary": "Epic summary",
-                "description": "Epic description",
-                "stories": [
-                    {{
-                        "summary": "Story summary",
-                        "description": "Story description",
-                        "acceptance_criteria": "Given... When... Then..."
-                    }}
-                ]
-            }}
-        ]
-    }}
+def generate_epics_and_stories(product_goal: str) -> str:
     """
+    Given a product goal string, generate epics and user stories
+    in a structured text format.
+    """
+    prompt = f"""
+You are Silo, a product management assistant.
+
+Given this product goal:
+
+\"\"\"{product_goal}\"\"\"
+
+Break it down into epics and user stories.
+
+Output ONLY in the following structured text format:
+
+Epic 1: [Epic summary]
+Description: [Epic description]
+
+Stories:
+  1. Summary: [User story summary]
+     Description: [User story detailed description]
+     Acceptance Criteria: [Acceptance criteria for the story]
+
+  2. Summary: ...
+     Description: ...
+     Acceptance Criteria: ...
+
+(Use numbering for epics and stories as shown, indent stories under epics.)
+"""
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Use "gpt-4" if available
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # or "gpt-4" if you have access
             messages=[
-                {"role": "system", "content": "You are a product manager assistant."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "You are a helpful product management assistant."},
+                {"role": "user", "content": prompt},
             ],
+            max_tokens=1500,
             temperature=0.4,
-            max_tokens=1000
         )
-        content = response.choices[0].message.content
-        return content
+        text_response = response.choices[0].message.content.strip()
+        return text_response
+
     except Exception as e:
-        print("OpenAI API Error:", e)
-        return None
+        return f"Silo was unable to process the request: {str(e)}"
 
+def parse_response_to_json(response_text: str):
+    """
+    Placeholder parser to convert structured text into JSON-like dict.
+    You can extend this to parse the actual structured text into a dictionary
+    for easier processing or Jira integration.
 
-def parse_response_to_json(response_text):
-    try:
-        cleaned = response_text.replace("'", '"')
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        print("Failed to parse GPT response:", e)
-        return None
+    For now, returns raw text.
+    """
+    return response_text

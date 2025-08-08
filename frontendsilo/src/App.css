@@ -1,0 +1,153 @@
+import React, { useState } from "react";
+import axios from "axios";
+
+function App() {
+  const [input, setInput] = useState("");
+  const [epics, setEpics] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const response = await axios.post("http://localhost:5000/generate", { input });
+      setEpics(response.data.epics);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={appStyle}>
+      <div style={orbStyle}></div>
+      <div style={containerStyle}>
+        <h1 style={logoStyle}>silo</h1>
+        <form onSubmit={handleSubmit} style={formStyle}>
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Describe the product feature or goal"
+            style={inputStyle}
+          />
+          <button type="submit" style={buttonStyle}>
+            {loading ? "Generating..." : "Generate Tickets"}
+          </button>
+        </form>
+        <div style={epicsContainerStyle}>
+          {epics.map((epic, index) => (
+            <div key={index} style={epicCardStyle}>
+              <h2 style={epicTitleStyle}>{epic.title}</h2>
+              <ul>
+                {epic.stories.map((story, idx) => (
+                  <li key={idx} style={storyStyle}>{story}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const appStyle = {
+  fontFamily: "'Inter', sans-serif",
+  backgroundColor: "#0f172a",
+  color: "#f1f5f9",
+  minHeight: "100vh",
+  display: "flex",
+  justifyContent: "center",
+  alignItems: "center",
+  padding: "40px 20px",
+};
+
+const containerStyle = {
+  width: "100%",
+  maxWidth: "800px",
+  position: "relative",
+  zIndex: 1,
+};
+
+const orbStyle = {
+  position: "fixed",
+  top: "40%",
+  left: "50%",
+  width: "500px",
+  height: "500px",
+  background: "radial-gradient(circle, #0ea5e950, transparent 70%)",
+  borderRadius: "50%",
+  filter: "blur(120px)",
+  transform: "translate(-50%, -50%)",
+  animation: "pulse 6s ease-in-out infinite",
+  zIndex: -1,
+};
+
+const logoStyle = {
+  fontSize: "2.8rem",
+  fontWeight: "700",
+  marginBottom: "30px",
+  color: "#38bdf8",
+  textAlign: "center",
+  letterSpacing: "-1px",
+};
+
+const formStyle = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "16px",
+};
+
+const inputStyle = {
+  width: "100%",
+  padding: "14px 18px",
+  fontSize: "1.2rem",
+  borderRadius: "10px",
+  border: "1px solid #334155",
+  backgroundColor: "#1e293b",
+  color: "#f1f5f9",
+  outline: "none",
+};
+
+const buttonStyle = {
+  padding: "14px 20px",
+  fontSize: "1.1rem",
+  borderRadius: "10px",
+  backgroundColor: "#38bdf8",
+  color: "#0f172a",
+  fontWeight: "600",
+  border: "none",
+  cursor: "pointer",
+  transition: "all 0.3s",
+  boxShadow: "0 0 12px #38bdf870",
+};
+
+const epicsContainerStyle = {
+  marginTop: "40px",
+};
+
+const epicCardStyle = {
+  backgroundColor: "#1e293b",
+  borderRadius: "12px",
+  padding: "20px",
+  marginBottom: "30px",
+  boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+  border: "1px solid #334155",
+};
+
+const epicTitleStyle = {
+  fontSize: "1.4rem",
+  marginBottom: "12px",
+  color: "#38bdf8",
+};
+
+const storyStyle = {
+  fontSize: "1rem",
+  marginBottom: "8px",
+  lineHeight: "1.5",
+  color: "#f1f5f9",
+};
+
+export default App;
