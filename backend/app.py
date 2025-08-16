@@ -406,6 +406,7 @@ def _ensure_ui_impl_stories(epics):
         if len(stories) >= 6:
             continue
 
+        # Index helpers
         eng_ui_candidates = set()
         api_story_ids = []
         for st in stories:
@@ -415,6 +416,7 @@ def _ensure_ui_impl_stories(epics):
             if st.get("type") == "Engineering" and (_API_HINT.search(summary_lower) or "api" in summary_lower):
                 api_story_ids.append(st["storyId"])
 
+        # For each design story, consider adding a UI impl story if none exists
         for st in list(stories):
             if len(stories) >= 6:
                 break
@@ -423,6 +425,7 @@ def _ensure_ui_impl_stories(epics):
 
             base = st.get("summary") or "ui-implementation"
             ui_story_id = f"str-ui-impl-{slugify(base)}"
+            # Skip if an Engineering UI story that references this already exists
             exists = any(
                 s for s in stories
                 if s.get("type") == "Engineering" and (
@@ -433,6 +436,7 @@ def _ensure_ui_impl_stories(epics):
             if exists:
                 continue
 
+            # Construct UI impl story
             labels = list(st.get("labels", []))
             platform_hint = "web"
             txt = (" ".join(labels) + " " + ep.get("description","") + " " + base).lower()
@@ -442,6 +446,7 @@ def _ensure_ui_impl_stories(epics):
                 platform_hint = "web"
 
             deps = set(st.get("dependencies", []))
+            # depend on related API stories and the design story itself
             deps.update(api_story_ids)
             deps.add(st.get("storyId"))
 
@@ -450,7 +455,7 @@ def _ensure_ui_impl_stories(epics):
                 "type": "Engineering",
                 "summary": f"Implement {platform_hint.upper()} UI: {st.get('summary','')}",
                 "description": (
-                    f"Build the {platform_hint.UPPER()} UI for '{st.get('summary','')}', "
+                    f"Build the {platform_hint.upper()} UI for '{st.get('summary','')}', "
                     f"wire to back-end APIs, and implement state, validation, and error handling. "
                     f"Includes unit/UI tests and accessibility (WCAG AA)."
                 ),
@@ -476,6 +481,7 @@ def _ensure_ui_impl_stories(epics):
             stories.append(ui_story)
 
         ep["stories"] = stories[:6]  # enforce cap
+
 
 # ---------------------------
 # Validation & normalization
