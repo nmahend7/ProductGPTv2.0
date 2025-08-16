@@ -232,7 +232,7 @@ _API_HINT = re.compile(r"\b(api|endpoint|service|controller|handler|sdk|server|s
 _AUTH_HINT = re.compile(r"\b(auth|login|sign[- ]?in|oauth|oidc|token|session|mfa|two[- ]?factor)\b", re.I)
 _CONNECT_HINT = re.compile(r"\b(pair|bluetooth|connect(ion)?|vehicle\s*(link|pair|connect)|provision(ing)?)\b", re.I)
 
-# Feature tokens (kept from your earlier logic; harmless for non-vehicle contexts)
+# Feature tokens (kept from earlier logic; harmless for non-vehicle contexts)
 FEATURE_PATTERNS = {
     "lock": re.compile(r"\block(ing)?\b", re.I),
     "unlock": re.compile(r"\bunlock(ing)?\b", re.I),
@@ -277,7 +277,7 @@ def _infer_missing_priority(st):
         return "P2"
     return "P1"
 
-# Robust normalization for priority & type (handles synonyms/casing & junk like "P?")
+# Robust normalization for priority & type
 def _normalize_priority(value: str) -> str:
     if not value:
         return ""
@@ -357,15 +357,11 @@ def _auto_infer_dependencies(epics):
             st["dependencies"] = list(deps)
 
 def _sanitize_story(story_obj):
-    """
-    Final guardrail: ensure strict values for 'type' and 'priority'.
-    Replace unknowns with inferred defaults so FE never sees "P?" or "N/A" unless explicitly empty.
-    """
+    """Final guardrail: ensure strict values for 'type' and 'priority' and ownerRole default."""
     story_obj["type"] = _normalize_type(story_obj.get("type", "")) or story_obj.get("type", "")
     if story_obj["type"] not in ALLOWED_TYPES:
         _infer_missing_type(story_obj)
         if story_obj.get("type") not in ALLOWED_TYPES:
-            # fall back
             txt = f'{story_obj.get("summary","")} {story_obj.get("description","")}'
             story_obj["type"] = "Engineering" if _API_HINT.search(txt) else "Design"
 
@@ -375,6 +371,95 @@ def _sanitize_story(story_obj):
 
     if not story_obj.get("ownerRole"):
         story_obj["ownerRole"] = "UX" if story_obj["type"] == "Design" else "Backend"
+
+# --- Augmenter: ensure UI Engineering implementation stories for user-facing flows ---
+def _ensure_ui_impl_stories(epics):
+    """
+    For each epic:
+      - For each Design story (user-facing), ensure there is a matching Engineering UI implementation story.
+      - New story depends on: (a) Design story (handoff), (b) related API/auth/connect stories if present.
+      - Respect cap of <= 6 stories/epic.
+    """
+    for ep in epics:
+        stories = ep.get("stories", [])
+        if len(stories) >= 6:
+            continue
+
+        # Index helpers
+        eng_ui_candidates = set()
+        api_story_ids = []
+        for st in stories:
+            summary_lower = (st.get("summary","") + " " + st.get("description","")).lower()
+            if st.get("type") == "Engineering" and ("ui" in summary_lower or "frontend" in summary_lower or "mobile" in summary_lower or "implement ui" in summary_lower):
+                eng_ui_candidates.add(st["storyId"])
+            if st.get("type") == "Engineering" and (_API_HINT.search(summary_lower) or "api" in summary_lower):
+                api_story_ids.append(st["storyId"])
+
+        # For each design story, consider adding a UI impl story if none exists
+        for st in list(stories):
+            if len(stories) >= 6:
+                break
+            if st.get("type") != "Design":
+                continue
+
+            base = st.get("summary") or "ui-implementation"
+            ui_story_id = f"str-ui-impl-{slugify(base)}"
+            # Skip if an Engineering UI story that references this already exists
+            exists = any(
+                s for s in stories
+                if s.get("type") == "Engineering" and (
+                    ui_story_id == s.get("storyId") or
+                    slugify(base) in slugify(s.get("summary",""))
+                )
+            )
+            if exists:
+                continue
+
+            # Construct UI impl story
+            labels = list(st.get("labels", []))
+            platform_hint = "web"
+            txt = (" ".join(labels) + " " + ep.get("description","") + " " + base).lower()
+            if any(k in txt for k in ["ios","android","mobile"]):
+                platform_hint = "mobile"
+            elif "web" in txt or "frontend" in txt or "react" in txt:
+                platform_hint = "web"
+
+            deps = set(st.get("dependencies", []))
+            # depend on related API stories and the design story itself
+            deps.update(api_story_ids)
+            deps.add(st.get("storyId"))
+
+            ui_story = {
+                "storyId": ui_story_id,
+                "type": "Engineering",
+                "summary": f"Implement {platform_hint.upper()} UI: {st.get('summary','')}",
+                "description": (
+                    f"Build the {platform_hint.upper()} UI for '{st.get('summary','')}', "
+                    f"wire to back-end APIs, and implement state, validation, and error handling. "
+                    f"Includes unit/UI tests and accessibility (WCAG AA)."
+                ),
+                "acceptanceCriteria": [
+                    "UI matches approved design spec and redlines.",
+                    "All fields validated; errors surfaced inline and are accessible.",
+                    "Integrated with required APIs; success and failure states handled.",
+                    "Meets a11y (WCAG AA) for focus order, labels, color contrast.",
+                    "Unit/UI tests passing; telemetry events emitted per analytics spec."
+                ],
+                "estimate": "2-3d",
+                "priority": st.get("priority") or "P1",
+                "labels": list(set(labels + [platform_hint, "ui", "implementation"])),
+                "ownerRole": "Frontend" if platform_hint == "web" else "Mobile",
+                "dependencies": list(deps),
+                "testCases": [
+                    "Given valid inputs, When submitted, Then API call succeeds and success UI shown.",
+                    "Given API error, When submitted, Then error toast and recovery UI displayed."
+                ]
+            }
+            _sanitize_story(ui_story)
+            _clamp_lengths(ui_story)
+            stories.append(ui_story)
+
+        ep["stories"] = stories[:6]  # enforce cap
 
 # ---------------------------
 # Validation & normalization
@@ -387,6 +472,7 @@ def validate_and_normalize(epics_raw):
     - Normalizes & guarantees 'type' (Design|Engineering) and 'priority' (P0|P1|P2)
     - Sensible ownerRole defaults
     - Infers obvious dependencies
+    - Adds Engineering UI implementation stories for user-facing Design stories (capacity permitting)
     - Prunes unknown deps and dependency cycles
     - Clamps long AC/test lists
     Returns (epics, warnings)
@@ -450,7 +536,6 @@ def validate_and_normalize(epics_raw):
                 "testCases": tests
             }
 
-            # Ensure valid & present type/priority and ownerRole defaults
             _sanitize_story(story_obj)
             _clamp_lengths(story_obj)
             stories.append(story_obj)
@@ -469,15 +554,20 @@ def validate_and_normalize(epics_raw):
         for st in ep["stories"]:
             st["dependencies"] = [d for d in st["dependencies"] if d in story_ids]
 
-    # Ensure unique IDs, then infer deps, then prune cycles
+    # Ensure unique IDs, then infer deps
     _dedupe_story_ids(epics)
     _auto_infer_dependencies(epics)
+
+    # Add UI implementation stories for user-facing flows (capacity permitting)
+    _ensure_ui_impl_stories(epics)
+
+    # Prune cycles after augmentation
     _prune_dependency_cycles(epics)
 
     return epics, warnings
 
 # ---------------------------
-# PRD schema validation (lightweight)
+# PRD schema validation (lightweight) + Markdown rendering
 # ---------------------------
 def validate_prd(prd_raw):
     required_keys = [
@@ -513,6 +603,118 @@ def validate_prd(prd_raw):
     prd_raw["raci_view"] = raci[:25]
     prd_raw["daci"] = daci
     return prd_raw
+
+def _md_heading(text, level=2):
+    text = str(text or "").strip()
+    hashes = "#" * max(1, min(6, level))
+    return f"{hashes} {text}\n\n" if text else ""
+
+def _md_list(items):
+    out = ""
+    for it in ensure_list(items):
+        if isinstance(it, dict):
+            kv = "; ".join([f"**{k}**: {v}" for k, v in it.items()])
+            out += f"- {kv}\n"
+        else:
+            out += f"- {it}\n"
+    return out + ("\n" if out else "")
+
+def prd_to_markdown(prd):
+    md = f"# {prd.get('title','PRD')}\n\n"
+    if prd.get("context"):
+        md += f"{prd['context']}\n\n"
+
+    md += _md_heading("Objectives", 2) + _md_list(prd.get("objectives"))
+    md += _md_heading("Non-Goals", 2) + _md_list(prd.get("non_goals"))
+
+    # Personas
+    md += _md_heading("Personas", 2)
+    for p in ensure_list(prd.get("personas")):
+        name = p.get("name","Persona")
+        md += _md_heading(name, 3)
+        if p.get("summary"): md += f"{p['summary']}\n\n"
+        if p.get("primary_jobs_to_be_done"):
+            md += _md_heading("Primary JTBD", 4) + _md_list(p["primary_jobs_to_be_done"])
+
+    # Journeys
+    md += _md_heading("User Journeys", 2)
+    for j in ensure_list(prd.get("user_journeys")):
+        nm = j.get("name","Journey")
+        md += _md_heading(nm, 3)
+        if j.get("happy_path_steps"):
+            md += _md_heading("Happy Path", 4) + _md_list(j["happy_path_steps"])
+        if j.get("edge_cases"):
+            md += _md_heading("Edge Cases", 4) + _md_list(j["edge_cases"])
+
+    # Functional Req
+    md += _md_heading("Functional Requirements", 2)
+    for fr in ensure_list(prd.get("functional_requirements")):
+        title = f"{fr.get('id','FR')}: {fr.get('name','')}".strip()
+        md += _md_heading(title, 3)
+        md += _md_list(fr.get("details"))
+
+    # Non-Functional
+    nfr = prd.get("non_functional_requirements") or {}
+    md += _md_heading("Non-Functional Requirements", 2)
+    for section, items in nfr.items():
+        md += _md_heading(section.replace("_"," ").title(), 3)
+        md += _md_list(items)
+
+    # UX Deliverables
+    if prd.get("ux_deliverables"):
+        md += _md_heading("UX Deliverables", 2)
+        for d in ensure_list(prd.get("ux_deliverables")):
+            flow = d.get("flow","Flow")
+            md += _md_heading(flow, 3)
+            md += _md_list(d.get("artifacts"))
+
+    # Analytics
+    if prd.get("analytics"):
+        md += _md_heading("Analytics", 2)
+        for ev in ensure_list(prd["analytics"]):
+            line = f"- **Event**: {ev.get('event','')} — **Props**: {', '.join(ensure_list(ev.get('properties')))} — **Signal**: {ev.get('success_signal','')}\n"
+            md += line
+        md += "\n"
+
+    # Success metrics
+    if prd.get("success_metrics"):
+        md += _md_heading("Success Metrics", 2)
+        for m in ensure_list(prd["success_metrics"]):
+            line = f"- **{m.get('metric','Metric')}**: {m.get('target','')}\n"
+            md += line
+        md += "\n"
+
+    # Release plan
+    if prd.get("release_plan"):
+        md += _md_heading("Release Plan", 2)
+        for phase in ensure_list(prd["release_plan"]):
+            md += _md_heading(phase.get("phase","Phase"), 3)
+            if phase.get("scope"): md += _md_heading("Scope", 4) + _md_list(phase["scope"])
+            if phase.get("risks"): md += _md_heading("Risks", 4) + _md_list(phase["risks"])
+
+    # Risks, Questions, Dependencies
+    md += _md_heading("Risks", 2) + _md_list(prd.get("risks"))
+    md += _md_heading("Open Questions", 2) + _md_list(prd.get("open_questions"))
+    md += _md_heading("Dependencies", 2) + _md_list(prd.get("dependencies"))
+
+    # Governance
+    daci = prd.get("daci") or {}
+    md += _md_heading("Decision Framework", 2)
+    if daci:
+        md += _md_heading("DACI", 3)
+        md += f"- **Driver**: {daci.get('Driver','')}\n"
+        md += f"- **Approver**: {daci.get('Approver','')}\n"
+        md += f"- **Contributors**: {', '.join(ensure_list(daci.get('Contributors')))}\n"
+        md += f"- **Informed**: {', '.join(ensure_list(daci.get('Informed')))}\n\n"
+
+    raci = ensure_list(prd.get("raci_view"))
+    if raci:
+        md += _md_heading("RACI", 3)
+        for row in raci:
+            md += f"- **{row.get('workstream','')}** — R: {row.get('R','')}; A: {row.get('A','')}; C: {', '.join(ensure_list(row.get('C')))}; I: {', '.join(ensure_list(row.get('I')))}\n"
+        md += "\n"
+
+    return md.strip() + "\n"
 
 # ---------------------------
 # OpenAI helper with retries
@@ -559,7 +761,7 @@ def generate():
 
         prompt = f"Generate product epics and stories for the following product goal:\n{goal}"
         system_inst = """
-You are a Principal PM + Tech Lead + UX Lead generating **Jira-ready planning** for ANY product surface: web apps, mobile apps, back-end services, APIs, data pipelines/ML, integrations, or platform/infra. Your output must be realistic, implementation-aware, and testable.
+You are a Principal PM + Tech Lead + UX Lead generating **Jira-ready planning** for ANY product surface: web apps, mobile apps, back-end services/APIs, data pipelines/ML, integrations, or platform/infra. Your output must be realistic, implementation-aware, and testable.
 
 Return ONLY valid JSON (no markdown, no comments). Output MUST be a JSON array of epics following this schema (fields shown are required). The example values are illustrative only—choose values appropriate to the goal.
 
@@ -590,12 +792,13 @@ Return ONLY valid JSON (no markdown, no comments). Output MUST be a JSON array o
 QUALITY RULES (STRICT):
 - Limit to 3–5 epics; each epic 3–6 stories.
 - Every story MUST include non-empty "type" (Design|Engineering) AND "priority" (P0|P1|P2).
-- For **user-facing goals**, create BOTH Design and Engineering stories for the main flows.
-  - Design stories MUST include deliverables (IA/wireframes/visual spec/Figma components/redlines) and a "Figma handoff to engineering" acceptance criterion.
-  - Engineering stories MUST include granular back-end/API and UI integration where relevant.
-- Also include Engineering stories for security/compliance/standards (encryption in transit/at rest, OAuth2/OIDC, audit logging, PII handling, SOC2/GDPR/HIPAA where relevant), and ops concerns (observability, rate limiting, retries).
-- Dependencies must reflect realistic build order; avoid cycles (UI → API; API → auth/infra when applicable).
-- Acceptance criteria must be actionable and testable.
+- For **user-facing goals**, create BOTH:
+  (a) Design stories with deliverables (IA/wireframes/visual spec/Figma components/redlines) and a "Figma handoff to engineering" acceptance criterion.
+  (b) Engineering stories for **UI implementation** (per primary screen/flow) that wire the UI to back-end APIs, plus Engineering stories for granular APIs.
+- Also include Engineering stories for security/compliance/standards (encryption at rest/in transit, OAuth2/OIDC, audit logging, PII handling, SOC2/GDPR/HIPAA where relevant), and ops concerns (observability, rate limiting, retries).
+- Dependencies reflect realistic build order and avoid cycles:
+  Design → UI Engineering → API Engineering where applicable (and API → auth/infra prerequisites).
+- Acceptance criteria are actionable and testable.
 - Estimates realistic and normalized (4h|1d|2d|5d or ranges like 1-2d).
 - Professional tone. Use kebab-case stable IDs, unique within the response.
 """
@@ -665,7 +868,7 @@ CONTENT:
         }), 500
 
 # ---------------------------
-# PRD Generation Route
+# PRD Generation Route (JSON + Markdown)
 # ---------------------------
 @app.route('/generate_prd', methods=['POST', 'OPTIONS'])
 def generate_prd():
@@ -676,11 +879,11 @@ def generate_prd():
         goal = (data.get("goal") or "").strip()[:1200]
 
         if not goal:
-            return jsonify({"prd": {}, "status": "error", "error": "No goal provided."}), 400
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "No goal provided."}), 400
         if not is_meaningful_goal(goal):
-            return jsonify({"prd": {}, "status": "error", "error": "Please provide a more descriptive, product-related goal."}), 400
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "Please provide a more descriptive, product-related goal."}), 400
         if not moderate_text(goal):
-            return jsonify({"prd": {}, "status": "error", "error": "The provided text violates our usage policy. Please rephrase your request."}), 400
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "The provided text violates our usage policy. Please rephrase your request."}), 400
 
         system_inst = """
 You are a Principal PM creating a rigorous Product Requirements Document (PRD) for ANY product surface (web, mobile, back-end/API, data/ML, integrations, platform/infra). Use a DACI model for decision-making and also include a simple RACI view per workstream. Be concise, professional, and implementation-aware.
@@ -753,11 +956,11 @@ QUALITY RULES:
                 max_tokens=MAX_TOKENS_PRD,
             )
         except APITimeoutError:
-            return jsonify({"prd": {}, "status": "error", "error": "Upstream model timeout."}), 504
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "Upstream model timeout."}), 504
         except RateLimitError:
-            return jsonify({"prd": {}, "status": "error", "error": "Rate limited by model."}), 429
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "Rate limited by model."}), 429
         except APIError as e:
-            return jsonify({"prd": {}, "status": "error", "error": f"Upstream API error: {str(e)}"}), 502
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": f"Upstream API error: {str(e)}"}), 502
 
         raw = strip_code_fences(response.choices[0].message.content or "")
 
@@ -781,20 +984,24 @@ CONTENT:
                     raw = strip_code_fences(fix.choices[0].message.content or "")
                     prd_raw = json.loads(raw)
                 except Exception:
-                    return jsonify({"prd": {}, "status": "error", "error": "Model returned invalid JSON and repair failed."}), 502
+                    return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "Model returned invalid JSON and repair failed."}), 502
             else:
-                return jsonify({"prd": {}, "status": "error", "error": "Model returned invalid JSON."}), 502
+                return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": "Model returned invalid JSON."}), 502
 
         try:
             prd = validate_prd(prd_raw)
         except ValueError as ve:
-            return jsonify({"prd": {}, "status": "error", "error": str(ve)}), 400
+            return jsonify({"prd": {}, "prd_markdown": "", "status": "error", "error": str(ve)}), 400
 
-        return jsonify({"prd": prd, "status": "success"}), 200
+        # Also return a pretty Markdown version for rendering
+        prd_markdown = prd_to_markdown(prd)
+
+        return jsonify({"prd": prd, "prd_markdown": prd_markdown, "status": "success"}), 200
 
     except Exception as e:
         return jsonify({
             "prd": {},
+            "prd_markdown": "",
             "status": "error",
             "error": "Unexpected server error.",
             "details": str(e)

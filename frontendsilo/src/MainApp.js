@@ -15,26 +15,11 @@ const pulseKeyframes = `
 }
 
 @keyframes glow {
-  0% {
-    text-shadow: 0 0 8px #0ff, 0 0 12px #00f, 0 0 20px #0ff;
-    color: #0ff;
-  }
-  25% {
-    text-shadow: 0 0 8px #ff00ff, 0 0 14px #f0f, 0 0 22px #f0f;
-    color: #ff00ff;
-  }
-  50% {
-    text-shadow: 0 0 8px #0f0, 0 0 14px #0f0, 0 0 22px #0f0;
-    color: #0f0;
-  }
-  75% {
-    text-shadow: 0 0 10px #00f, 0 0 14px #00f, 0 0 22px #00f;
-    color: #00f;
-  }
-  100% {
-    text-shadow: 0 0 8px #0ff, 0 0 12px #00f, 0 0 20px #0ff;
-    color: #0ff;
-  }
+  0% { text-shadow: 0 0 8px #0ff, 0 0 12px #00f, 0 0 20px #0ff; color: #0ff; }
+  25% { text-shadow: 0 0 8px #ff00ff, 0 0 14px #f0f, 0 0 22px #f0f; color: #ff00ff; }
+  50% { text-shadow: 0 0 8px #0f0, 0 0 14px #0f0, 0 0 22px #0f0; color: #0f0; }
+  75% { text-shadow: 0 0 10px #00f, 0 0 14px #00f, 0 0 22px #00f; color: #00f; }
+  100% { text-shadow: 0 0 8px #0ff, 0 0 12px #00f, 0 0 20px #0ff; color: #0ff; }
 }
 `;
 
@@ -68,7 +53,6 @@ function slugify(s) {
 }
 
 function normalizeEpics(rawEpics) {
-  // Ensure epicId/storyId exist for selection/deps/export
   return (rawEpics || []).map((epic, ei) => {
     const epicId =
       epic.epicId || `epc-${slugify(epic.epic || `epic-${ei + 1}`)}-${ei + 1}`;
@@ -139,16 +123,87 @@ function topoSortStories(stories) {
   return [...ordered, ...leftover];
 }
 
+/* ----- Tiny Markdown → HTML (headings, bold, lists, paragraphs) ----- */
+function escapeHtml(s) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+function mdToHtml(md) {
+  if (!md) return "";
+  const lines = md.split(/\r?\n/);
+
+  const out = [];
+  let inList = false;
+
+  const flushP = (buf) => {
+    if (!buf.length) return;
+    out.push(`<p>${buf.join(" ").trim()}</p>`);
+    buf.length = 0;
+  };
+
+  let pbuf = [];
+  for (let raw of lines) {
+    let line = raw;
+    // headings
+    if (/^#{1,6}\s+/.test(line)) {
+      flushP(pbuf);
+      const level = (line.match(/^#+/) || ["#"])[0].length;
+      const text = line.replace(/^#{1,6}\s+/, "");
+      out.push(`<h${level}>${escapeHtml(text)}</h${level}>`);
+      continue;
+    }
+
+    // list item
+    if (/^\s*-\s+/.test(line)) {
+      flushP(pbuf);
+      if (!inList) {
+        inList = true;
+        out.push("<ul>");
+      }
+      const li = line.replace(/^\s*-\s+/, "");
+      out.push(`<li>${inlineMd(escapeHtml(li))}</li>`);
+      continue;
+    } else if (inList && line.trim() === "") {
+      out.push("</ul>");
+      inList = false;
+      continue;
+    }
+
+    // blank line
+    if (line.trim() === "") {
+      flushP(pbuf);
+      continue;
+    }
+
+    // paragraph buffer
+    pbuf.push(inlineMd(escapeHtml(line)));
+  }
+  if (inList) out.push("</ul>");
+  flushP(pbuf);
+  return out.join("\n");
+}
+function inlineMd(s) {
+  // bold **text**
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // simple italics _text_
+  s = s.replace(/(^|[^\w])_([^_]+)_/g, "$1<em>$2</em>");
+  return s;
+}
+
 /* ----- Main App ----- */
 function MainApp({ user, onLogout }) {
   const [goal, setGoal] = useState("");
   const [epics, setEpics] = useState([]);
   const [prd, setPrd] = useState(null);
+  const [prdMarkdown, setPrdMarkdown] = useState("");
   const [activeTab, setActiveTab] = useState("tickets"); // "tickets" | "prd"
   const [loading, setLoading] = useState(false);
   const [prdLoading, setPrdLoading] = useState(false);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(() => new Set()); // storyIds
+  const [showJsonEditor, setShowJsonEditor] = useState(false);
 
   const logoStyle = {
     fontSize: "3rem",
@@ -174,9 +229,7 @@ function MainApp({ user, onLogout }) {
 
   const logoText = loading ? "loading" : "silo";
 
-  // Build lookups:
-  // 1) storyIndex: storyId -> { summary, epicId, epic }
-  // 2) dependentsIndex: storyId -> [storyIds that depend on it]
+  // Build lookups
   const { storyIndex, dependentsIndex } = useMemo(() => {
     const idx = {};
     const depsIdx = {};
@@ -247,6 +300,7 @@ function MainApp({ user, onLogout }) {
       const data = await res.json();
       if (res.ok) {
         setPrd(data.prd || {});
+        setPrdMarkdown(data.prd_markdown || "");
       } else {
         setError(data.error || "Failed to generate PRD");
       }
@@ -260,9 +314,11 @@ function MainApp({ user, onLogout }) {
   function handleSubmit(e) {
     e.preventDefault();
     if (!goal.trim()) return;
-    // default to tickets tab when generating
-    if (activeTab !== "tickets") setActiveTab("tickets");
-    fetchTickets();
+    if (activeTab === "tickets") {
+      fetchTickets();
+    } else {
+      fetchPrd();
+    }
   }
 
   function toggleSelectStory(storyId) {
@@ -274,7 +330,6 @@ function MainApp({ user, onLogout }) {
     });
   }
 
-  // Add this story's prerequisites (direct deps) into selection
   function addDepsToSelection(depsArr) {
     if (!depsArr || depsArr.length === 0) return;
     setSelected((prev) => {
@@ -448,9 +503,9 @@ function MainApp({ user, onLogout }) {
           })}
         </div>
 
-        {/* Query form */}
+        {/* Query form (buttons are tab-specific) */}
         <form onSubmit={handleSubmit} style={{ width: "100%", maxWidth: 800 }}>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input
               type="text"
               placeholder="Enter your product goal..."
@@ -458,6 +513,7 @@ function MainApp({ user, onLogout }) {
               onChange={(e) => setGoal(e.target.value)}
               style={{
                 flex: 1,
+                minWidth: 260,
                 padding: "12px 16px",
                 fontSize: "1.1rem",
                 borderRadius: "8px",
@@ -467,45 +523,52 @@ function MainApp({ user, onLogout }) {
                 boxShadow: "0 2px 5px rgb(0 0 0 / 0.3)",
               }}
             />
-            <button
-              type="submit"
-              disabled={loading || !goal.trim()}
-              style={{
-                padding: "12px 16px",
-                fontSize: "1.05rem",
-                borderRadius: "8px",
-                border: "1px solid " + (loading ? "#2a2f45" : "transparent"),
-                backgroundColor: loading ? "#2a2a42" : "#00bcd4",
-                color: loading ? "#8aa0ac" : "white",
-                cursor: loading ? "not-allowed" : "pointer",
-                minWidth: 160,
-                boxShadow: loading
-                  ? "none"
-                  : "0 4px 12px rgba(0, 255, 255, 0.4)",
-                transition: "background-color 0.2s",
-              }}
-              title={loading ? "Generating..." : "Generate tickets"}
-            >
-              Generate Tickets
-            </button>
-            <button
-              type="button"
-              onClick={fetchPrd}
-              disabled={prdLoading || !goal.trim()}
-              style={{
-                padding: "12px 16px",
-                fontSize: "1.05rem",
-                borderRadius: "8px",
-                border: "1px solid " + (prdLoading ? "#2a2f45" : "#333"),
-                backgroundColor: prdLoading ? "#2a2a42" : "#1e1e2f",
-                color: prdLoading ? "#8aa0ac" : "#e7f3ff",
-                cursor: prdLoading ? "not-allowed" : "pointer",
-                minWidth: 160,
-              }}
-              title={prdLoading ? "Generating PRD..." : "Generate PRD"}
-            >
-              Generate PRD
-            </button>
+
+            {activeTab === "tickets" ? (
+              <button
+                type="submit"
+                disabled={loading || !goal.trim()}
+                style={{
+                  padding: "12px 16px",
+                  fontSize: "1.05rem",
+                  borderRadius: "8px",
+                  border: "1px solid " + (loading ? "#2a2f45" : "transparent"),
+                  backgroundColor: loading ? "#2a2a42" : "#00bcd4",
+                  color: loading ? "#8aa0ac" : "white",
+                  cursor: loading ? "not-allowed" : "pointer",
+                  minWidth: 160,
+                  boxShadow: loading
+                    ? "none"
+                    : "0 4px 12px rgba(0, 255, 255, 0.4)",
+                  transition: "background-color 0.2s",
+                }}
+                title={loading ? "Generating..." : "Generate tickets"}
+              >
+                Generate Tickets
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={prdLoading || !goal.trim()}
+                style={{
+                  padding: "12px 16px",
+                  fontSize: "1.05rem",
+                  borderRadius: "8px",
+                  border: "1px solid " + (prdLoading ? "#2a2f45" : "transparent"),
+                  backgroundColor: prdLoading ? "#2a2a42" : "#00bcd4",
+                  color: prdLoading ? "#8aa0ac" : "white",
+                  cursor: prdLoading ? "not-allowed" : "pointer",
+                  minWidth: 160,
+                  boxShadow: prdLoading
+                    ? "none"
+                    : "0 4px 12px rgba(0, 255, 255, 0.4)",
+                  transition: "background-color 0.2s",
+                }}
+                title={prdLoading ? "Generating PRD..." : "Generate PRD"}
+              >
+                Generate PRD
+              </button>
+            )}
           </div>
         </form>
 
@@ -539,7 +602,14 @@ function MainApp({ user, onLogout }) {
             addDepsToSelection={addDepsToSelection}
           />
         ) : (
-          <PrdView prd={prd} setPrd={setPrd} />
+          <PrdView
+            prd={prd}
+            setPrd={setPrd}
+            prdMarkdown={prdMarkdown}
+            setPrdMarkdown={setPrdMarkdown}
+            showJsonEditor={showJsonEditor}
+            setShowJsonEditor={setShowJsonEditor}
+          />
         )}
       </div>
     </>
@@ -604,7 +674,6 @@ function TicketsView({
         }}
       >
         {epics.map((epic) => {
-          // ensure displayed order is topo-sorted
           const sortedStories = topoSortStories(epic.stories || []);
           const allIds = sortedStories.map((s) => s.storyId) || [];
           const allSelected =
@@ -631,14 +700,11 @@ function TicketsView({
   );
 }
 
-/* ----- PRD Tab ----- */
-function PrdView({ prd, setPrd }) {
-  const [raw, setRaw] = useState(() =>
-    prd ? JSON.stringify(prd, null, 2) : ""
-  );
+/* ----- PRD Tab (Markdown view + optional JSON editor) ----- */
+function PrdView({ prd, setPrd, prdMarkdown, setPrdMarkdown, showJsonEditor, setShowJsonEditor }) {
+  const [raw, setRaw] = useState(() => (prd ? JSON.stringify(prd, null, 2) : ""));
   const [parseErr, setParseErr] = useState("");
 
-  // keep textarea in sync if prd prop changes
   React.useEffect(() => {
     if (prd) setRaw(JSON.stringify(prd, null, 2));
   }, [prd]);
@@ -653,12 +719,11 @@ function PrdView({ prd, setPrd }) {
     }
   }
 
-  function handleDownload() {
+  function handleDownloadJSON() {
     try {
       const obj = prd ?? JSON.parse(raw);
       downloadJSON("prd.json", obj);
     } catch {
-      // if parsing fails, just dump raw text for debugging
       const blob = new Blob([raw], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -671,53 +736,119 @@ function PrdView({ prd, setPrd }) {
     }
   }
 
+  function handleDownloadMarkdown() {
+    const blob = new Blob([prdMarkdown || ""], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "prd.md";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  const html = mdToHtml(prdMarkdown || "");
+
   return (
     <div style={{ width: "100%", maxWidth: 1000, marginTop: 16 }}>
-      {!prd && (
-        <div
-          style={{
-            marginBottom: 10,
-            color: "#9fb3c8",
-          }}
-        >
-          Tip: click <strong>Generate PRD</strong> (above) after entering a
-          goal, then edit the JSON below. You can save/download it anytime.
+      {!prdMarkdown && (
+        <div style={{ marginBottom: 10, color: "#9fb3c8" }}>
+          Tip: enter a goal above and click <strong>Generate PRD</strong>.
         </div>
       )}
-      <textarea
-        value={raw}
-        onChange={(e) => setRaw(e.target.value)}
-        placeholder={
-          prd
-            ? "Edit PRD JSON…"
-            : "PRD JSON will appear here once generated. You can also paste your own JSON and click Apply."
-        }
-        rows={24}
-        style={{
-          width: "100%",
-          padding: "12px 14px",
-          borderRadius: 10,
-          border: "1px solid #2b3252",
-          background: "#121428",
-          color: "#e6f3ff",
-          outline: "none",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
-          fontSize: 13,
-          lineHeight: 1.5,
-          boxShadow: "inset 0 0 5px #00ffff20",
-        }}
-      />
-      {parseErr && (
-        <div style={{ color: "#ff8a8a", marginTop: 8 }}>Parse error: {parseErr}</div>
+
+      {/* Pretty PRD render */}
+      {prdMarkdown && (
+        <div
+          style={{
+            background: "linear-gradient(180deg, #14162c 0%, #0f1122 100%)",
+            border: "1px solid #1f2540",
+            borderRadius: 14,
+            padding: 20,
+            boxShadow: "0 6px 28px rgba(0, 255, 255, 0.06)",
+          }}
+        >
+          <div
+            style={{
+              lineHeight: 1.65,
+              color: "#e6f3ff",
+            }}
+          >
+            <style>{`
+              .prd h1{font-size:1.9rem;margin:0 0 12px;color:#9be7ff}
+              .prd h2{font-size:1.4rem;margin:18px 0 8px;color:#80e8ff}
+              .prd h3{font-size:1.15rem;margin:14px 0 6px;color:#bdefff}
+              .prd h4{font-size:1rem;margin:10px 0 4px;color:#d8f6ff}
+              .prd p{margin:8px 0;color:#e6f3ff}
+              .prd ul{margin:6px 0 10px 20px;padding-left:16px}
+              .prd li{margin:4px 0}
+              .toolbar{display:flex;gap:8px;margin-bottom:10px}
+            `}</style>
+
+            <div className="toolbar" style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button onClick={handleDownloadMarkdown} style={btnPrimary}>
+                Download Markdown
+              </button>
+              <button onClick={() => setShowJsonEditor((v) => !v)} style={btnSecondary}>
+                {showJsonEditor ? "Hide JSON" : "Show JSON"}
+              </button>
+              <button onClick={handleDownloadJSON} style={btnSecondary}>
+                Download JSON
+              </button>
+            </div>
+
+            <div
+              className="prd"
+              dangerouslySetInnerHTML={{ __html: html }}
+              style={{}}
+            />
+          </div>
+        </div>
       )}
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <button onClick={handleApply} style={btnPrimary}>
-          Apply Changes
-        </button>
-        <button onClick={handleDownload} style={btnSecondary}>
-          Download JSON
-        </button>
-      </div>
+
+      {/* Optional JSON editor (kept for power users; hidden by default) */}
+      {showJsonEditor && (
+        <div style={{ marginTop: 14 }}>
+          <textarea
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            placeholder={
+              prd
+                ? "Edit PRD JSON…"
+                : "PRD JSON will appear here once generated. You can also paste your own JSON and click Apply."
+            }
+            rows={24}
+            style={{
+              width: "100%",
+              padding: "12px 14px",
+              borderRadius: 10,
+              border: "1px solid #2b3252",
+              background: "#121428",
+              color: "#e6f3ff",
+              outline: "none",
+              fontFamily:
+                "ui-monospace, SFMono-Regular, Menlo, Monaco, 'Courier New', monospace",
+              fontSize: 13,
+              lineHeight: 1.5,
+              boxShadow: "inset 0 0 5px #00ffff20",
+            }}
+          />
+          {parseErr && (
+            <div style={{ color: "#ff8a8a", marginTop: 8 }}>
+              Parse error: {parseErr}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={handleApply} style={btnPrimary}>
+              Apply Changes
+            </button>
+            <button onClick={handleDownloadJSON} style={btnSecondary}>
+              Download JSON
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -738,7 +869,6 @@ function EpicCard({
   const area = epic.area?.trim();
   const { allSelected, someSelected } = epicSelectState;
 
-  // Inline epic editing: title/description (kept minimal; no regression)
   const [editingEpic, setEditingEpic] = useState(false);
   const [epicForm, setEpicForm] = useState({
     epic: epic.epic || "",
@@ -878,7 +1008,6 @@ function StoryCard({
 }) {
   const [editing, setEditing] = useState(false);
 
-  // Editable fields state
   const [form, setForm] = useState(() => ({
     summary: story.summary || "",
     description: story.description || "",
@@ -927,10 +1056,8 @@ function StoryCard({
     setEditing(false);
   }
 
-  const priorityVariant = (story.priority || "").toLowerCase(); // p0/p1/p2/''
-
-  const leftBorderColor =
-    deps.length > 0 ? "#caa84a" : "#1aa3a3"; // amber if blocked, teal if root
+  const priorityVariant = (story.priority || "").toLowerCase();
+  const leftBorderColor = deps.length > 0 ? "#caa84a" : "#1aa3a3";
 
   return (
     <div
@@ -975,7 +1102,6 @@ function StoryCard({
                 <div style={{ fontWeight: 700, fontSize: "1.05rem" }}>
                   {story.summary}
                 </div>
-                {/* Right side chips: Type, Priority, Estimate */}
                 <div
                   style={{
                     display: "flex",
@@ -984,7 +1110,6 @@ function StoryCard({
                     flexShrink: 0,
                   }}
                 >
-                  {/* Issue type (Design/Engineering) */}
                   {story.type ? (
                     <Badge
                       label={story.type}
@@ -998,7 +1123,6 @@ function StoryCard({
                     <Badge label="Type: N/A" variant="ghost" />
                   )}
 
-                  {/* Priority */}
                   {story.priority ? (
                     <Badge label={story.priority} variant={priorityVariant} />
                   ) : (
@@ -1029,7 +1153,6 @@ function StoryCard({
             </div>
           )}
 
-          {/* Meta editors (when editing) */}
           {editing && (
             <div
               style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}
@@ -1068,7 +1191,6 @@ function StoryCard({
             </div>
           )}
 
-          {/* Description */}
           {!editing ? (
             <p style={{ marginBottom: 8, whiteSpace: "pre-wrap", color: "#eee" }}>
               {story.description}
@@ -1083,7 +1205,6 @@ function StoryCard({
             />
           )}
 
-          {/* Dependencies (Blocked by …) */}
           {!editing && (
             <>
               <div
@@ -1128,7 +1249,6 @@ function StoryCard({
                 )}
               </div>
 
-              {/* Dependents (Blocks …) */}
               <div
                 style={{
                   display: "flex",
@@ -1164,7 +1284,6 @@ function StoryCard({
             </>
           )}
 
-          {/* Acceptance Criteria */}
           {!editing ? (
             <AcceptanceCriteria criteria={story.acceptanceCriteria} />
           ) : (
@@ -1180,7 +1299,6 @@ function StoryCard({
             </div>
           )}
 
-          {/* Test Cases */}
           {!editing ? (
             <TestCases testCases={story.testCases} />
           ) : (
@@ -1196,7 +1314,6 @@ function StoryCard({
             </div>
           )}
 
-          {/* Edit/Save/Cancel */}
           <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
             {!editing ? (
               <button onClick={() => setEditing(true)} style={btnSecondary}>
@@ -1287,7 +1404,6 @@ function Badge({ label, variant = "outline" }) {
 
 function AcceptanceCriteria({ criteria }) {
   if (!criteria || criteria.length === 0) return null;
-
   return (
     <div style={{ marginTop: 8 }}>
       <strong>Acceptance Criteria:</strong>
@@ -1302,7 +1418,6 @@ function AcceptanceCriteria({ criteria }) {
 
 function TestCases({ testCases }) {
   if (!testCases || testCases.length === 0) return null;
-
   return (
     <div style={{ marginTop: 8 }}>
       <strong>Test Cases:</strong>
