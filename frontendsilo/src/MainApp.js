@@ -130,6 +130,13 @@ function escapeHtml(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+function inlineMd(s) {
+  // bold **text**
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // simple italics _text_
+  s = s.replace(/(^|[^\w])_([^_]+)_/g, "$1<em>$2</em>");
+  return s;
+}
 function mdToHtml(md) {
   if (!md) return "";
   const lines = md.split(/\r?\n/);
@@ -146,6 +153,7 @@ function mdToHtml(md) {
   let pbuf = [];
   for (let raw of lines) {
     let line = raw;
+
     // headings
     if (/^#{1,6}\s+/.test(line)) {
       flushP(pbuf);
@@ -184,20 +192,13 @@ function mdToHtml(md) {
   flushP(pbuf);
   return out.join("\n");
 }
-function inlineMd(s) {
-  // bold **text**
-  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  // simple italics _text_
-  s = s.replace(/(^|[^\w])_([^_]+)_/g, "$1<em>$2</em>");
-  return s;
-}
 
 /* ----- Main App ----- */
 function MainApp({ user, onLogout }) {
   const [goal, setGoal] = useState("");
   const [epics, setEpics] = useState([]);
-  const [prd, setPrd] = useState(null);
-  const [prdMarkdown, setPrdMarkdown] = useState("");
+  const [prd, setPrd] = useState(null);           // optional JSON (power users)
+  const [prdMarkdown, setPrdMarkdown] = useState(""); // pretty content for UI
   const [activeTab, setActiveTab] = useState("tickets"); // "tickets" | "prd"
   const [loading, setLoading] = useState(false);
   const [prdLoading, setPrdLoading] = useState(false);
@@ -224,7 +225,8 @@ function MainApp({ user, onLogout }) {
     border: "1px solid #1f2a44",
     background:
       "linear-gradient(180deg, rgba(18,20,38,0.9) 0%, rgba(28,31,58,0.9) 100%)",
-    boxShadow: "0 4px 24px rgba(0,255,255,0.15), inset 0 0 0 1px rgba(255,255,255,0.04)",
+    boxShadow:
+      "0 4px 24px rgba(0,255,255,0.15), inset 0 0 0 1px rgba(255,255,255,0.04)",
   };
 
   const logoText = loading ? "loading" : "silo";
@@ -299,6 +301,7 @@ function MainApp({ user, onLogout }) {
       });
       const data = await res.json();
       if (res.ok) {
+        // Markdown-first rendering; JSON kept for optional editor/export
         setPrd(data.prd || {});
         setPrdMarkdown(data.prd_markdown || "");
       } else {
@@ -503,9 +506,9 @@ function MainApp({ user, onLogout }) {
           })}
         </div>
 
-        {/* Query form (buttons are tab-specific) */}
+        {/* Query form (stacked: input on first row, button below & centered) */}
         <form onSubmit={handleSubmit} style={{ width: "100%", maxWidth: 800 }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8 }}>
             <input
               type="text"
               placeholder="Enter your product goal..."
@@ -513,7 +516,6 @@ function MainApp({ user, onLogout }) {
               onChange={(e) => setGoal(e.target.value)}
               style={{
                 flex: 1,
-                minWidth: 260,
                 padding: "12px 16px",
                 fontSize: "1.1rem",
                 borderRadius: "8px",
@@ -523,7 +525,17 @@ function MainApp({ user, onLogout }) {
                 boxShadow: "0 2px 5px rgb(0 0 0 / 0.3)",
               }}
             />
+          </div>
 
+          {/* Buttons row (centered) */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              gap: 10,
+              marginTop: 10,
+            }}
+          >
             {activeTab === "tickets" ? (
               <button
                 type="submit"
@@ -536,7 +548,7 @@ function MainApp({ user, onLogout }) {
                   backgroundColor: loading ? "#2a2a42" : "#00bcd4",
                   color: loading ? "#8aa0ac" : "white",
                   cursor: loading ? "not-allowed" : "pointer",
-                  minWidth: 160,
+                  minWidth: 180,
                   boxShadow: loading
                     ? "none"
                     : "0 4px 12px rgba(0, 255, 255, 0.4)",
@@ -558,7 +570,7 @@ function MainApp({ user, onLogout }) {
                   backgroundColor: prdLoading ? "#2a2a42" : "#00bcd4",
                   color: prdLoading ? "#8aa0ac" : "white",
                   cursor: prdLoading ? "not-allowed" : "pointer",
-                  minWidth: 160,
+                  minWidth: 180,
                   boxShadow: prdLoading
                     ? "none"
                     : "0 4px 12px rgba(0, 255, 255, 0.4)",
@@ -701,7 +713,14 @@ function TicketsView({
 }
 
 /* ----- PRD Tab (Markdown view + optional JSON editor) ----- */
-function PrdView({ prd, setPrd, prdMarkdown, setPrdMarkdown, showJsonEditor, setShowJsonEditor }) {
+function PrdView({
+  prd,
+  setPrd,
+  prdMarkdown,
+  setPrdMarkdown,
+  showJsonEditor,
+  setShowJsonEditor,
+}) {
   const [raw, setRaw] = useState(() => (prd ? JSON.stringify(prd, null, 2) : ""));
   const [parseErr, setParseErr] = useState("");
 
@@ -753,7 +772,7 @@ function PrdView({ prd, setPrd, prdMarkdown, setPrdMarkdown, showJsonEditor, set
   return (
     <div style={{ width: "100%", maxWidth: 1000, marginTop: 16 }}>
       {!prdMarkdown && (
-        <div style={{ marginBottom: 10, color: "#9fb3c8" }}>
+        <div style={{ marginBottom: 10, color: "#9fb3c8", textAlign: "center" }}>
           Tip: enter a goal above and click <strong>Generate PRD</strong>.
         </div>
       )}
@@ -769,12 +788,7 @@ function PrdView({ prd, setPrd, prdMarkdown, setPrdMarkdown, showJsonEditor, set
             boxShadow: "0 6px 28px rgba(0, 255, 255, 0.06)",
           }}
         >
-          <div
-            style={{
-              lineHeight: 1.65,
-              color: "#e6f3ff",
-            }}
-          >
+          <div style={{ lineHeight: 1.65, color: "#e6f3ff" }}>
             <style>{`
               .prd h1{font-size:1.9rem;margin:0 0 12px;color:#9be7ff}
               .prd h2{font-size:1.4rem;margin:18px 0 8px;color:#80e8ff}
@@ -790,7 +804,10 @@ function PrdView({ prd, setPrd, prdMarkdown, setPrdMarkdown, showJsonEditor, set
               <button onClick={handleDownloadMarkdown} style={btnPrimary}>
                 Download Markdown
               </button>
-              <button onClick={() => setShowJsonEditor((v) => !v)} style={btnSecondary}>
+              <button
+                onClick={() => setShowJsonEditor((v) => !v)}
+                style={btnSecondary}
+              >
                 {showJsonEditor ? "Hide JSON" : "Show JSON"}
               </button>
               <button onClick={handleDownloadJSON} style={btnSecondary}>
@@ -801,7 +818,6 @@ function PrdView({ prd, setPrd, prdMarkdown, setPrdMarkdown, showJsonEditor, set
             <div
               className="prd"
               dangerouslySetInnerHTML={{ __html: html }}
-              style={{}}
             />
           </div>
         </div>
